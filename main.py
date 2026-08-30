@@ -134,6 +134,27 @@ def fit_cover(image, width, height):
     return resized.crop((left, top, left + width, top + height))
 
 
+def render_image_for_area(image, width, height, mode="fill", background="#081226"):
+    """Render one image into one monitor/preview area without distortion."""
+    width, height = max(1, int(width)), max(1, int(height))
+    if mode == "fit":
+        ratio = min(width / image.width, height / image.height)
+        size = (max(1, int(round(image.width * ratio))), max(1, int(round(image.height * ratio))))
+        rendered = image.resize(size, Image.Resampling.LANCZOS)
+        result = Image.new("RGB", (width, height), background)
+        result.paste(rendered, ((width - size[0]) // 2, (height - size[1]) // 2))
+        return result
+    if mode == "original":
+        result = Image.new("RGB", (width, height), background)
+        crop_w, crop_h = min(width, image.width), min(height, image.height)
+        left = (image.width - crop_w) // 2
+        top = (image.height - crop_h) // 2
+        cropped = image.crop((left, top, left + crop_w, top + crop_h))
+        result.paste(cropped, ((width - crop_w) // 2, (height - crop_h) // 2))
+        return result
+    return fit_cover(image, width, height)
+
+
 def monitor_geometry(width, height, left, top):
     """Build a Tk geometry string while preserving negative monitor coordinates."""
     x = f"+{left}" if left >= 0 else str(left)
@@ -163,7 +184,7 @@ class PrivacyOverlay:
         self.activated_idle = 0.0
         self.poll_id = None
 
-    def show(self, image_path, opacity):
+    def show(self, image_path, opacity, display_mode="fill"):
         if self.windows:
             return
         monitors = enumerate_monitors()
@@ -196,7 +217,7 @@ class PrivacyOverlay:
             if source_image is not None:
                 try:
                     # Each monitor receives an independently sized/cropped image.
-                    display_image = fit_cover(source_image, width, height)
+                    display_image = render_image_for_area(source_image, width, height, display_mode)
                     photo = ImageTk.PhotoImage(display_image)
                     canvas.create_image(0, 0, image=photo, anchor="nw")
                 except Exception:
@@ -250,6 +271,12 @@ class App:
         self.timeout = tk.IntVar(value=self.settings.get("timeout", 30))
         self.image_path = tk.StringVar(value=self.settings.get("image", DEFAULT_IMAGE))
         self.opacity = tk.DoubleVar(value=self.settings.get("opacity", .98))
+        self.theme_mode = tk.StringVar(value=self.settings.get("theme", "system"))
+        if self.theme_mode.get() not in ("system", "dark", "light"):
+            self.theme_mode.set("system")
+        self.display_mode = tk.StringVar(value=self.settings.get("image_display_mode", "fill"))
+        if self.display_mode.get() not in ("fill", "fit", "original"):
+            self.display_mode.set("fill")
         self.protection_enabled = True
         self.current_page = None
         self.nav_buttons = {}
@@ -269,6 +296,9 @@ class App:
         self._ui_rebuild_job = None
         self._rebuilding_ui = False
         self._dpi_value = None
+        self._resolved_theme = None
+        self._theme_poll = None
+        self.apply_theme(rebuild=False)
         self.ensure_default_image()
         self.center_window()
         self.sync_dpi_scaling()
@@ -278,17 +308,28 @@ class App:
         self.show_page("overview")
         self.tick()
 
-    BG = "#090D15"
-    SIDEBAR = "#0C111B"
-    SURFACE = "#101722"
-    SURFACE_2 = "#141D2A"
-    BORDER = "#202A39"
+    THEMES = {
+        "dark": {"BG": "#0B101A", "SIDEBAR": "#0F1622", "SURFACE": "#121B29",
+                 "SURFACE_2": "#182437", "BORDER": "#263449", "TEXT": "#F2F5F9",
+                 "MUTED": "#B1BDCC", "SUBTLE": "#8190A4", "ACCENT": "#4D7CFE",
+                 "ACCENT_HOVER": "#628CFF", "SUCCESS": "#72D0AD"},
+        "light": {"BG": "#F3F6FA", "SIDEBAR": "#E8EDF4", "SURFACE": "#FFFFFF",
+                  "SURFACE_2": "#E9EEF6", "BORDER": "#D5DDE8", "TEXT": "#172235",
+                  "MUTED": "#526174", "SUBTLE": "#718096", "ACCENT": "#3F6FE8",
+                  "ACCENT_HOVER": "#315FD8", "SUCCESS": "#2E8B6D"},
+    }
+
+    BG = "#0B101A"
+    SIDEBAR = "#0F1622"
+    SURFACE = "#121B29"
+    SURFACE_2 = "#182437"
+    BORDER = "#263449"
     TEXT = "#F2F5F9"
-    MUTED = "#8995A7"
-    SUBTLE = "#596578"
+    MUTED = "#B1BDCC"
+    SUBTLE = "#8190A4"
     ACCENT = "#4D7CFE"
     ACCENT_HOVER = "#628CFF"
-    SUCCESS = "#65C9A5"
+    SUCCESS = "#72D0AD"
 
     def center_window(self):
         self.root.update_idletasks()
@@ -334,8 +375,38 @@ class App:
         except Exception:
             return {}
 
+    def system_prefers_light(self):
+        if os.name != "nt":
+            return False
+        try:
+            import winreg
+            key = winreg.OpenKey(winreg.HKEY_CURRENT_USER,
+                                 r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize")
+            value, _ = winreg.QueryValueEx(key, "AppsUseLightTheme")
+            winreg.CloseKey(key)
+            return int(value) == 1
+        except (OSError, ValueError):
+            return False
+
+    def resolve_theme(self):
+        return "light" if self.theme_mode.get() == "system" and self.system_prefers_light() else (
+            "dark" if self.theme_mode.get() == "system" else self.theme_mode.get())
+
+    def apply_theme(self, rebuild=True):
+        resolved = self.resolve_theme()
+        changed = resolved != self._resolved_theme
+        self._resolved_theme = resolved
+        for name, value in self.THEMES[resolved].items():
+            setattr(self, name, value)
+        self.root.configure(bg=self.BG)
+        if rebuild and changed and hasattr(self, "shell"):
+            self.schedule_ui_rebuild()
+        return changed
+
     def save_settings(self):
-        data = {"timeout": self.timeout.get(), "image": self.image_path.get(), "opacity": self.opacity.get()}
+        data = {"timeout": self.timeout.get(), "image": self.image_path.get(),
+                "opacity": self.opacity.get(), "theme": self.theme_mode.get(),
+                "image_display_mode": self.display_mode.get()}
         try:
             with open(CONFIG_FILE, "w", encoding="utf-8") as f:
                 json.dump(data, f, ensure_ascii=False, indent=2)
@@ -624,6 +695,15 @@ class App:
             tk.Label(modes, text=("● " if selected else "○ ") + label, bg=self.BG,
                      fg=self.ACCENT if selected else self.SUBTLE,
                      font=("Microsoft YaHei UI", 9, "bold" if selected else "normal")).pack(anchor="w", pady=2)
+        self.mode_buttons = {}
+        mode_actions = tk.Frame(controls, bg=self.BG)
+        mode_actions.pack(fill="x", pady=(0, 12))
+        for mode, label in (("fill", "填充"), ("fit", "适应"), ("original", "原始比例")):
+            button = tk.Button(mode_actions, text=label, command=lambda value=mode: self.set_display_mode(value),
+                               anchor="w", relief="flat", bd=0, cursor="hand2", padx=4, pady=3)
+            button.pack(fill="x")
+            self.mode_buttons[mode] = button
+        self.refresh_mode_buttons()
         opacity_row = tk.Frame(controls, bg=self.BG)
         opacity_row.pack(fill="x")
         tk.Label(opacity_row, text="屏保不透明度", bg=self.BG, fg=self.TEXT,
@@ -1016,6 +1096,39 @@ class App:
             button.configure(bg=self.ACCENT if selected else self.SURFACE_2,
                              fg="#FFFFFF" if selected else self.MUTED)
 
+    def set_display_mode(self, value):
+        if value not in ("fill", "fit", "original"):
+            return
+        self.display_mode.set(value)
+        self.refresh_mode_buttons()
+        self.save_settings()
+        self.schedule_preview_refresh(0)
+
+    def refresh_mode_buttons(self):
+        buttons = getattr(self, "mode_buttons", {})
+        labels = {"fill": "● 填充", "fit": "○ 适应", "original": "○ 原始比例"}
+        for mode, button in buttons.items():
+            selected = mode == self.display_mode.get()
+            button.configure(text=("● " if selected else "○ ") + labels[mode].split(" ", 1)[-1],
+                             bg=self.SURFACE_2 if selected else self.BG,
+                             fg=self.ACCENT if selected else self.MUTED,
+                             activebackground=self.SURFACE_2 if selected else self.BG,
+                             activeforeground=self.ACCENT if selected else self.TEXT,
+                             font=("Microsoft YaHei UI", 9, "bold" if selected else "normal"))
+
+    def set_theme_mode(self, _value=None):
+        self.save_settings()
+        self.apply_theme(rebuild=True)
+
+    def set_theme_mode_label(self, label):
+        mapping = {"跟随系统": "system", "深色": "dark", "浅色": "light"}
+        self.theme_mode.set(mapping.get(label, "system"))
+        self.set_theme_mode()
+
+    def refresh_theme_menu_label(self):
+        if hasattr(self, "theme_menu"):
+            self.theme_menu.configure(text=self.theme_options.get(self.theme_mode.get(), "跟随系统"))
+
     def toggle_protection(self):
         self.protection_enabled = not self.protection_enabled
         if self.protection_enabled:
@@ -1086,6 +1199,125 @@ class App:
         if self.protection_enabled and not self.overlay.windows and idle >= timeout_seconds:
             self.root.withdraw()
             self.overlay.show(self.image_path.get(), self.opacity.get())
+        self.root.after(1000, self.tick)
+
+
+    # Final theme-aware presentation methods.  They intentionally replace only
+    # the settings pages and image presentation; the overlay core stays intact.
+    def build_appearance_refined(self, page):
+        self.page_subtitle(page, "选择一张安静的背景图片，隐幕会按每台显示器的分辨率独立裁剪。")
+        body = tk.Frame(page, bg=self.BG)
+        body.pack(fill="both", expand=True, padx=36)
+        body.grid_columnconfigure(0, weight=1, minsize=0)
+        body.grid_columnconfigure(1, weight=0, minsize=220)
+        body.grid_rowconfigure(0, weight=1)
+        self.appearance_body = body
+        preview_box = self.refined_section(body)
+        preview_box.grid(row=0, column=0, sticky="nsew", padx=(0, 18))
+        self.preview = tk.Label(preview_box, bg=self.SURFACE_2)
+        self.preview.pack(fill="both", expand=True, padx=14, pady=14)
+        controls = tk.Frame(body, bg=self.BG, width=250)
+        controls.grid(row=0, column=1, sticky="nsew")
+        controls.grid_propagate(False)
+        self.appearance_controls = controls
+        tk.Label(controls, text="当前图片", bg=self.BG, fg=self.MUTED,
+                 font=("Microsoft YaHei UI", 9)).pack(anchor="w")
+        tk.Label(controls, textvariable=self.image_name, bg=self.BG, fg=self.TEXT,
+                 font=("Segoe UI", 9, "bold"), wraplength=230, justify="left").pack(anchor="w", pady=(6, 14))
+        self.refined_button(controls, "更换图片", self.choose_image).pack(fill="x")
+        self.refined_button(controls, "恢复默认", self.restore_default, quiet=True).pack(fill="x", pady=(8, 0))
+        tk.Frame(controls, bg=self.BORDER, height=1).pack(fill="x", pady=20)
+        tk.Label(controls, text="显示方式", bg=self.BG, fg=self.TEXT,
+                 font=("Microsoft YaHei UI", 10, "bold")).pack(anchor="w")
+        self.mode_buttons = {}
+        for mode, label in (("fill", "填充"), ("fit", "适应"), ("original", "原始比例")):
+            button = tk.Button(controls, text=label, command=lambda value=mode: self.set_display_mode(value),
+                               anchor="w", relief="flat", bd=0, cursor="hand2", padx=4, pady=4)
+            button.pack(fill="x")
+            self.mode_buttons[mode] = button
+        self.refresh_mode_buttons()
+        tk.Frame(controls, bg=self.BORDER, height=1).pack(fill="x", pady=16)
+        opacity_row = tk.Frame(controls, bg=self.BG)
+        opacity_row.pack(fill="x")
+        tk.Label(opacity_row, text="屏保不透明度", bg=self.BG, fg=self.TEXT,
+                 font=("Microsoft YaHei UI", 10, "bold")).pack(side="left")
+        tk.Label(opacity_row, textvariable=self.opacity_display, bg=self.BG, fg=self.ACCENT,
+                 font=("Segoe UI", 9, "bold")).pack(side="right")
+        self.opacity_scale = tk.Scale(controls, from_=35, to=100, orient="horizontal", showvalue=False,
+                                      command=self.change_opacity, bg=self.BG, troughcolor=self.BORDER,
+                                      activebackground=self.ACCENT, highlightthickness=0, bd=0,
+                                      sliderrelief="flat", length=240)
+        self.opacity_scale.set(self.opacity.get() * 100)
+        self.opacity_scale.pack(fill="x", pady=(9, 0))
+        tk.Label(controls, text="支持 JPG、JPEG、PNG、WEBP", bg=self.BG, fg=self.SUBTLE,
+                 font=("Microsoft YaHei UI", 8)).pack(anchor="w", pady=(16, 0))
+
+    def build_settings_refined(self, page):
+        self.page_subtitle(page, "调整隐幕的外观与使用偏好。")
+        body = self.refined_section(page)
+        body.pack(fill="x", padx=36)
+        self.setting_row_refined(body, "自动保护", "闲置达到设定时间后自动显示隐私画面", "已启用")
+        self.separator_refined(body)
+        row = tk.Frame(body, bg=self.SURFACE)
+        row.pack(fill="x", padx=24, pady=16)
+        text = tk.Frame(row, bg=self.SURFACE)
+        text.pack(side="left")
+        tk.Label(text, text="外观", bg=self.SURFACE, fg=self.TEXT,
+                 font=("Microsoft YaHei UI", 10, "bold")).pack(anchor="w")
+        tk.Label(text, text="主题", bg=self.SURFACE, fg=self.MUTED,
+                 font=("Microsoft YaHei UI", 8)).pack(anchor="w", pady=(4, 0))
+        self.theme_options = {"system": "跟随系统", "dark": "深色", "light": "浅色"}
+        self.theme_menu = tk.OptionMenu(row, self.theme_mode, "跟随系统", "深色", "浅色", command=self.set_theme_mode_label)
+        self.theme_menu.configure(bg=self.SURFACE_2, fg=self.TEXT, activebackground=self.BORDER,
+                                  activeforeground=self.TEXT, relief="flat", bd=0, highlightthickness=0,
+                                  padx=10, pady=4, font=("Microsoft YaHei UI", 9))
+        self.theme_menu["menu"].configure(bg=self.SURFACE_2, fg=self.TEXT,
+                                           activebackground=self.ACCENT, activeforeground="#FFFFFF")
+        self.theme_menu.pack(side="right")
+        self.refresh_theme_menu_label()
+        self.separator_refined(body)
+        self.setting_row_refined(body, "当前版本", "隐幕 · Privacy Screen", "v1.0.0")
+        about = tk.Frame(page, bg=self.BG)
+        about.pack(fill="x", padx=36, pady=(26, 0))
+        tk.Label(about, text="隐幕", bg=self.BG, fg=self.TEXT,
+                 font=("Microsoft YaHei UI", 12, "bold")).pack(anchor="w")
+        tk.Label(about, text="Privacy Screen  ·  Version 1.0.0", bg=self.BG, fg=self.MUTED,
+                 font=("Segoe UI", 9)).pack(anchor="w", pady=(4, 0))
+
+    def update_preview(self):
+        self._preview_job = None
+        if not hasattr(self, "preview") or Image is None or not os.path.exists(self.image_path.get()):
+            return
+        try:
+            width = max(1, self.preview.winfo_width() - 8)
+            height = max(1, self.preview.winfo_height() - 8)
+            if width < 80 or height < 60:
+                return
+            with Image.open(self.image_path.get()) as source:
+                image = source.convert("RGB")
+            image = render_image_for_area(image, width, height, self.display_mode.get(), self.SURFACE_2)
+            self.preview_ref = ImageTk.PhotoImage(image)
+            self.preview.configure(image=self.preview_ref)
+        except Exception:
+            pass
+
+    def test_overlay(self):
+        self.save_settings()
+        self.root.withdraw()
+        self.overlay.show(self.image_path.get(), self.opacity.get(), self.display_mode.get())
+
+    def tick(self):
+        idle = idle_seconds()
+        timeout_seconds = max(1, self.timeout.get()) * 60
+        remaining = max(0, int(timeout_seconds - idle))
+        hours, remainder = divmod(remaining, 3600)
+        minutes, seconds = divmod(remainder, 60)
+        self.countdown_text.set(f"{hours:02d}:{minutes:02d}:{seconds:02d}")
+        if self.theme_mode.get() == "system":
+            self.apply_theme(rebuild=True)
+        if self.protection_enabled and not self.overlay.windows and idle >= timeout_seconds:
+            self.root.withdraw()
+            self.overlay.show(self.image_path.get(), self.opacity.get(), self.display_mode.get())
         self.root.after(1000, self.tick)
 
 
