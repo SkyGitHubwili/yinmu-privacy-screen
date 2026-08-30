@@ -9,4 +9,4 @@ build_final/
 dist_final/
 *.spec
 *.exe
-!YinMu-UI-Final-DPI.exe
+!YinMu-Privacy-Screen.exe

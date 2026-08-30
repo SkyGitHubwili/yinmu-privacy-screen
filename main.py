@@ -277,6 +277,7 @@ class App:
         self.display_mode = tk.StringVar(value=self.settings.get("image_display_mode", "fill"))
         if self.display_mode.get() not in ("fill", "fit", "original"):
             self.display_mode.set("fill")
+        self.autostart_enabled = tk.BooleanVar(value=self.is_autostart_enabled())
         self.protection_enabled = True
         self.current_page = None
         self.nav_buttons = {}
@@ -387,6 +388,69 @@ class App:
             return int(value) == 1
         except (OSError, ValueError):
             return False
+
+    def startup_command(self):
+        if getattr(sys, "frozen", False):
+            return f'"{os.path.abspath(sys.executable)}"'
+        return f'"{os.path.abspath(sys.executable)}" "{os.path.abspath(__file__)}"'
+
+    def is_autostart_enabled(self):
+        if os.name != "nt":
+            return False
+        try:
+            import winreg
+            with winreg.OpenKey(winreg.HKEY_CURRENT_USER,
+                                r"Software\Microsoft\Windows\CurrentVersion\Run") as key:
+                winreg.QueryValueEx(key, "YinMuPrivacyScreen")
+            return True
+        except OSError:
+            return False
+
+    def toggle_autostart(self):
+        if os.name != "nt":
+            self.autostart_enabled.set(False)
+            return
+        try:
+            import winreg
+            path = r"Software\Microsoft\Windows\CurrentVersion\Run"
+            with winreg.CreateKey(winreg.HKEY_CURRENT_USER, path) as key:
+                if self.autostart_enabled.get():
+                    winreg.SetValueEx(key, "YinMuPrivacyScreen", 0, winreg.REG_SZ,
+                                      self.startup_command())
+                else:
+                    try:
+                        winreg.DeleteValue(key, "YinMuPrivacyScreen")
+                    except FileNotFoundError:
+                        pass
+        except OSError as error:
+            self.autostart_enabled.set(self.is_autostart_enabled())
+            messagebox.showerror("开机自启", f"无法修改 Windows 启动项：\n{error}")
+
+    def draw_toggle_switch(self, canvas, enabled):
+        canvas.delete("all")
+        track = self.ACCENT if enabled else self.BORDER
+        canvas.create_oval(1, 1, 21, 21, fill=track, outline=track)
+        canvas.create_oval(19, 1, 39, 21, fill=track, outline=track)
+        canvas.create_rectangle(11, 1, 29, 21, fill=track, outline=track)
+        thumb_x = 28 if enabled else 12
+        canvas.create_oval(thumb_x - 7, 4, thumb_x + 7, 18,
+                           fill="#FFFFFF", outline="#FFFFFF")
+
+    def create_toggle_switch(self, parent, variable, command):
+        canvas = tk.Canvas(parent, width=40, height=22, bg=self.SURFACE,
+                           highlightthickness=0, bd=0, cursor="hand2",
+                           takefocus=True)
+
+        def activate(_event=None):
+            variable.set(not variable.get())
+            command()
+            self.draw_toggle_switch(canvas, variable.get())
+
+        self.draw_toggle_switch(canvas, variable.get())
+        canvas.bind("<Button-1>", activate)
+        canvas.bind("<space>", activate)
+        canvas.bind("<Return>", activate)
+        return canvas
 
     def resolve_theme(self):
         return "light" if self.theme_mode.get() == "system" and self.system_prefers_light() else (
@@ -1126,8 +1190,8 @@ class App:
         self.set_theme_mode()
 
     def refresh_theme_menu_label(self):
-        if hasattr(self, "theme_menu"):
-            self.theme_menu.configure(text=self.theme_options.get(self.theme_mode.get(), "跟随系统"))
+        if hasattr(self, "theme_choice"):
+            self.theme_choice.set(self.theme_options.get(self.theme_mode.get(), "跟随系统"))
 
     def toggle_protection(self):
         self.protection_enabled = not self.protection_enabled
@@ -1258,6 +1322,18 @@ class App:
         body.pack(fill="x", padx=36)
         self.setting_row_refined(body, "自动保护", "闲置达到设定时间后自动显示隐私画面", "已启用")
         self.separator_refined(body)
+        startup_row = tk.Frame(body, bg=self.SURFACE)
+        startup_row.pack(fill="x", padx=24, pady=16)
+        startup_text = tk.Frame(startup_row, bg=self.SURFACE)
+        startup_text.pack(side="left")
+        tk.Label(startup_text, text="开机自启", bg=self.SURFACE, fg=self.TEXT,
+                 font=("Microsoft YaHei UI", 10, "bold")).pack(anchor="w")
+        tk.Label(startup_text, text="登录 Windows 后自动运行隐幕", bg=self.SURFACE, fg=self.MUTED,
+                 font=("Microsoft YaHei UI", 8)).pack(anchor="w", pady=(4, 0))
+        self.autostart_switch = self.create_toggle_switch(
+            startup_row, self.autostart_enabled, self.toggle_autostart)
+        self.autostart_switch.pack(side="right", padx=8)
+        self.separator_refined(body)
         row = tk.Frame(body, bg=self.SURFACE)
         row.pack(fill="x", padx=24, pady=16)
         text = tk.Frame(row, bg=self.SURFACE)
@@ -1267,7 +1343,8 @@ class App:
         tk.Label(text, text="主题", bg=self.SURFACE, fg=self.MUTED,
                  font=("Microsoft YaHei UI", 8)).pack(anchor="w", pady=(4, 0))
         self.theme_options = {"system": "跟随系统", "dark": "深色", "light": "浅色"}
-        self.theme_menu = tk.OptionMenu(row, self.theme_mode, "跟随系统", "深色", "浅色", command=self.set_theme_mode_label)
+        self.theme_choice = tk.StringVar(value=self.theme_options.get(self.theme_mode.get(), "跟随系统"))
+        self.theme_menu = tk.OptionMenu(row, self.theme_choice, "跟随系统", "深色", "浅色", command=self.set_theme_mode_label)
         self.theme_menu.configure(bg=self.SURFACE_2, fg=self.TEXT, activebackground=self.BORDER,
                                   activeforeground=self.TEXT, relief="flat", bd=0, highlightthickness=0,
                                   padx=10, pady=4, font=("Microsoft YaHei UI", 9))
