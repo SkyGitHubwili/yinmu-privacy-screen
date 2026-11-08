@@ -286,7 +286,8 @@ class PrivacyOverlay:
             return
         self.unlock_dialog_open = True
         try:
-            if self.app.prompt_unlock():
+            owner = self.windows[0]["window"] if self.windows else self.app
+            if self.app.prompt_unlock(owner):
                 self.hide()
             else:
                 self.activated_idle = idle_seconds()
@@ -464,14 +465,14 @@ class App:
             self.autostart_enabled.set(self.is_autostart_enabled())
             messagebox.showerror("开机自启", f"无法修改 Windows 启动项：\n{error}")
 
-    def prompt_unlock(self):
+    def prompt_unlock(self, owner):
         """Ask for the intentionally fixed unlock password before dismissing the overlay."""
         dialog = tk.Toplevel(self.root)
         dialog.title("解锁隐幕")
         dialog.configure(bg=self.SURFACE)
         dialog.resizable(False, False)
         dialog.attributes("-topmost", True)
-        dialog.transient(self.root)
+        dialog.transient(owner)
         result = {"success": False}
 
         body = tk.Frame(dialog, bg=self.SURFACE, padx=28, pady=24)
@@ -517,8 +518,13 @@ class App:
         dialog.bind("<Return>", submit)
         dialog.bind("<Escape>", lambda _event: cancel())
         dialog.update_idletasks()
-        x = max(0, (self.root.winfo_screenwidth() - dialog.winfo_width()) // 2)
-        y = max(0, (self.root.winfo_screenheight() - dialog.winfo_height()) // 2)
+        owner.update_idletasks()
+        owner_x = owner.winfo_rootx()
+        owner_y = owner.winfo_rooty()
+        owner_width = max(owner.winfo_width(), self.root.winfo_screenwidth())
+        owner_height = max(owner.winfo_height(), self.root.winfo_screenheight())
+        x = owner_x + max(0, (owner_width - dialog.winfo_width()) // 2)
+        y = owner_y + max(0, (owner_height - dialog.winfo_height()) // 2)
         dialog.geometry(f"+{x}+{y}")
         dialog.wait_visibility()
         dialog.lift()
