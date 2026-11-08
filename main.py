@@ -183,6 +183,7 @@ class PrivacyOverlay:
         self.windows = []
         self.activated_idle = 0.0
         self.poll_id = None
+        self.unlock_dialog_open = False
 
     def show(self, image_path, opacity, display_mode="fill"):
         if self.windows:
@@ -222,8 +223,9 @@ class PrivacyOverlay:
                     canvas.create_image(0, 0, image=photo, anchor="nw")
                 except Exception:
                     photo = None
-            win.bind("<KeyPress>", lambda _e: self.hide())
-            win.bind("<Button>", lambda _e: self.hide())
+            win.bind("<KeyPress>", lambda _e: self.request_unlock())
+            win.bind("<Button>", lambda _e: self.request_unlock())
+            win.bind("<Motion>", lambda _e: self.request_unlock())
             win.focus_force()
             overlay_entries.append({"window": win, "canvas": canvas, "photo": photo,
                                     "monitor": monitor})
@@ -237,10 +239,10 @@ class PrivacyOverlay:
             return
         # Ignore the tiny input event caused by focusing the overlay itself.
         if idle_seconds() < self.activated_idle - 0.15:
-            self.hide()
+            self.request_unlock()
             return
         if idle_seconds() < 0.45:
-            self.hide()
+            self.request_unlock()
             return
         self.poll_id = self.app.after(250, self.poll_activity)
 
@@ -257,13 +259,28 @@ class PrivacyOverlay:
         self.app.deiconify()
         self.app.lift()
 
+    def request_unlock(self):
+        if not self.windows or self.unlock_dialog_open:
+            return
+        if not self.app.unlock_protection_enabled:
+            self.hide()
+            return
+        self.unlock_dialog_open = True
+        try:
+            if self.app.prompt_unlock():
+                self.hide()
+            else:
+                self.activated_idle = idle_seconds()
+        finally:
+            self.unlock_dialog_open = False
+
 
 class App:
     def __init__(self, root):
         self.root = root
         self.root.title("隐幕 · Privacy Screen")
-        self.root.geometry("1000x680")
-        self.root.minsize(900, 600)
+        self.root.geometry("1080x720")
+        self.root.minsize(960, 640)
         self.root.configure(bg="#090D15")
         self.root.protocol("WM_DELETE_WINDOW", self.root.destroy)
         self.overlay = PrivacyOverlay(root)
@@ -278,6 +295,8 @@ class App:
         if self.display_mode.get() not in ("fill", "fit", "original"):
             self.display_mode.set("fill")
         self.autostart_enabled = tk.BooleanVar(value=self.is_autostart_enabled())
+        self.unlock_protection_enabled = tk.BooleanVar(
+            value=self.settings.get("unlock_protection_enabled", True))
         self.protection_enabled = True
         self.current_page = None
         self.nav_buttons = {}
@@ -310,14 +329,14 @@ class App:
         self.tick()
 
     THEMES = {
-        "dark": {"BG": "#0B101A", "SIDEBAR": "#0F1622", "SURFACE": "#121B29",
-                 "SURFACE_2": "#182437", "BORDER": "#263449", "TEXT": "#F2F5F9",
-                 "MUTED": "#B1BDCC", "SUBTLE": "#8190A4", "ACCENT": "#4D7CFE",
-                 "ACCENT_HOVER": "#628CFF", "SUCCESS": "#72D0AD"},
-        "light": {"BG": "#F3F6FA", "SIDEBAR": "#E8EDF4", "SURFACE": "#FFFFFF",
-                  "SURFACE_2": "#E9EEF6", "BORDER": "#D5DDE8", "TEXT": "#172235",
-                  "MUTED": "#526174", "SUBTLE": "#718096", "ACCENT": "#3F6FE8",
-                  "ACCENT_HOVER": "#315FD8", "SUCCESS": "#2E8B6D"},
+        "dark": {"BG": "#0A0F18", "SIDEBAR": "#0E1522", "SURFACE": "#131D2C",
+                 "SURFACE_2": "#1B2A40", "BORDER": "#2A3B55", "TEXT": "#F5F7FB",
+                 "MUTED": "#B6C1D1", "SUBTLE": "#8291A8", "ACCENT": "#667CFF",
+                 "ACCENT_HOVER": "#8294FF", "SUCCESS": "#75D6B2"},
+        "light": {"BG": "#F4F7FB", "SIDEBAR": "#E9EEF6", "SURFACE": "#FFFFFF",
+                   "SURFACE_2": "#EAF0F8", "BORDER": "#D4DEEC", "TEXT": "#172235",
+                   "MUTED": "#526174", "SUBTLE": "#718096", "ACCENT": "#536FF0",
+                   "ACCENT_HOVER": "#405DDB", "SUCCESS": "#2E8B6D"},
     }
 
     BG = "#0B101A"
@@ -334,7 +353,7 @@ class App:
 
     def center_window(self):
         self.root.update_idletasks()
-        width, height = 1000, 680
+        width, height = 1080, 720
         x = max(0, (self.root.winfo_screenwidth() - width) // 2)
         y = max(0, (self.root.winfo_screenheight() - height) // 2)
         self.root.geometry(f"{width}x{height}+{x}+{y}")
@@ -426,6 +445,67 @@ class App:
             self.autostart_enabled.set(self.is_autostart_enabled())
             messagebox.showerror("开机自启", f"无法修改 Windows 启动项：\n{error}")
 
+    def prompt_unlock(self):
+        """Ask for the intentionally fixed unlock password before dismissing the overlay."""
+        dialog = tk.Toplevel(self.root)
+        dialog.title("解锁隐幕")
+        dialog.configure(bg=self.SURFACE)
+        dialog.resizable(False, False)
+        dialog.attributes("-topmost", True)
+        dialog.transient(self.root)
+        result = {"success": False}
+
+        body = tk.Frame(dialog, bg=self.SURFACE, padx=28, pady=24)
+        body.pack(fill="both", expand=True)
+        tk.Label(body, text="屏保已锁定", bg=self.SURFACE, fg=self.TEXT,
+                 font=("Microsoft YaHei UI", 14, "bold")).pack(anchor="w")
+        tk.Label(body, text="请输入至少 3 个空格以提前打开屏幕。",
+                 bg=self.SURFACE, fg=self.MUTED,
+                 font=("Microsoft YaHei UI", 9)).pack(anchor="w", pady=(7, 16))
+        entry = tk.Entry(body, show="•", bg=self.BG, fg=self.TEXT,
+                         insertbackground=self.TEXT, relief="flat", bd=0,
+                         font=("Segoe UI", 12), width=25)
+        entry.pack(fill="x", ipady=9)
+        hint = tk.Label(body, text="固定密码为 3 个或更多空格，不能修改。",
+                        bg=self.SURFACE, fg=self.SUBTLE,
+                        font=("Microsoft YaHei UI", 8))
+        hint.pack(anchor="w", pady=(7, 0))
+        actions = tk.Frame(body, bg=self.SURFACE)
+        actions.pack(fill="x", pady=(20, 0))
+
+        def submit(_event=None):
+            value = entry.get()
+            if len(value) >= 3 and value.strip(" ") == "":
+                result["success"] = True
+                dialog.destroy()
+            else:
+                hint.configure(text="密码不正确，请输入 3 个或更多空格。", fg="#E5B567")
+                entry.delete(0, "end")
+                entry.focus_set()
+
+        def cancel():
+            dialog.destroy()
+
+        tk.Button(actions, text="取消", command=cancel, bg=self.SURFACE_2, fg=self.MUTED,
+                  activebackground=self.BORDER, activeforeground=self.TEXT,
+                  relief="flat", bd=0, padx=16, pady=8, cursor="hand2",
+                  font=("Microsoft YaHei UI", 9)).pack(side="right")
+        tk.Button(actions, text="解锁", command=submit, bg=self.ACCENT, fg="#FFFFFF",
+                  activebackground=self.ACCENT_HOVER, activeforeground="#FFFFFF",
+                  relief="flat", bd=0, padx=18, pady=8, cursor="hand2",
+                  font=("Microsoft YaHei UI", 9, "bold")).pack(side="right", padx=(0, 8))
+        dialog.protocol("WM_DELETE_WINDOW", cancel)
+        dialog.bind("<Return>", submit)
+        dialog.bind("<Escape>", lambda _event: cancel())
+        dialog.update_idletasks()
+        x = max(0, (self.root.winfo_screenwidth() - dialog.winfo_width()) // 2)
+        y = max(0, (self.root.winfo_screenheight() - dialog.winfo_height()) // 2)
+        dialog.geometry(f"+{x}+{y}")
+        dialog.grab_set()
+        entry.focus_set()
+        self.root.wait_window(dialog)
+        return result["success"]
+
     def draw_toggle_switch(self, canvas, enabled):
         canvas.delete("all")
         track = self.ACCENT if enabled else self.BORDER
@@ -470,7 +550,8 @@ class App:
     def save_settings(self):
         data = {"timeout": self.timeout.get(), "image": self.image_path.get(),
                 "opacity": self.opacity.get(), "theme": self.theme_mode.get(),
-                "image_display_mode": self.display_mode.get()}
+                "image_display_mode": self.display_mode.get(),
+                "unlock_protection_enabled": self.unlock_protection_enabled.get()}
         try:
             with open(CONFIG_FILE, "w", encoding="utf-8") as f:
                 json.dump(data, f, ensure_ascii=False, indent=2)
@@ -504,7 +585,7 @@ class App:
     # code below are intentionally left untouched; these methods only compose
     # the presentation layer around that already-tested core.
     def build_sidebar_refined(self, parent):
-        sidebar = tk.Frame(parent, bg=self.SIDEBAR, width=210)
+        sidebar = tk.Frame(parent, bg=self.SIDEBAR, width=228)
         sidebar.pack(side="left", fill="y")
         sidebar.pack_propagate(False)
         brand = tk.Frame(sidebar, bg=self.SIDEBAR)
@@ -1206,6 +1287,11 @@ class App:
             self.header_status.configure(text="●  已暂停", fg="#E5B567")
             self.pause_button.configure(text="恢复保护")
 
+    def toggle_unlock_protection(self):
+        self.save_settings()
+        if hasattr(self, "unlock_switch"):
+            self.draw_toggle_switch(self.unlock_switch, self.unlock_protection_enabled.get())
+
     def render_monitor_layout(self):
         if not hasattr(self, "monitor_canvas"):
             return
@@ -1333,6 +1419,19 @@ class App:
         self.autostart_switch = self.create_toggle_switch(
             startup_row, self.autostart_enabled, self.toggle_autostart)
         self.autostart_switch.pack(side="right", padx=8)
+        self.separator_refined(body)
+        unlock_row = tk.Frame(body, bg=self.SURFACE)
+        unlock_row.pack(fill="x", padx=24, pady=16)
+        unlock_text = tk.Frame(unlock_row, bg=self.SURFACE)
+        unlock_text.pack(side="left")
+        tk.Label(unlock_text, text="提前退出需要密码", bg=self.SURFACE, fg=self.TEXT,
+                 font=("Microsoft YaHei UI", 10, "bold")).pack(anchor="w")
+        tk.Label(unlock_text, text="防止他人移动鼠标直接打开隐私屏幕",
+                 bg=self.SURFACE, fg=self.MUTED,
+                 font=("Microsoft YaHei UI", 8)).pack(anchor="w", pady=(4, 0))
+        self.unlock_switch = self.create_toggle_switch(
+            unlock_row, self.unlock_protection_enabled, self.toggle_unlock_protection)
+        self.unlock_switch.pack(side="right", padx=8)
         self.separator_refined(body)
         row = tk.Frame(body, bg=self.SURFACE)
         row.pack(fill="x", padx=24, pady=16)
