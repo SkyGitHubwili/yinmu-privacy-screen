@@ -223,9 +223,15 @@ class PrivacyOverlay:
                     canvas.create_image(0, 0, image=photo, anchor="nw")
                 except Exception:
                     photo = None
-            win.bind("<KeyPress>", lambda _e: self.request_unlock())
-            win.bind("<Button>", lambda _e: self.request_unlock())
-            win.bind("<Motion>", lambda _e: self.request_unlock())
+            unlock_handler = lambda _e: self.request_unlock()
+            # Bind both the toplevel and its canvas. Tk sends pointer and
+            # keyboard events to the focused child first, so binding only the
+            # toplevel can miss events on the full-screen canvas.
+            for target in (win, canvas):
+                target.bind("<KeyPress>", unlock_handler, add="+")
+                target.bind("<ButtonPress>", unlock_handler, add="+")
+                target.bind("<Motion>", unlock_handler, add="+")
+            canvas.focus_set()
             win.focus_force()
             overlay_entries.append({"window": win, "canvas": canvas, "photo": photo,
                                     "monitor": monitor})
