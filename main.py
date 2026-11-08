@@ -184,6 +184,7 @@ class PrivacyOverlay:
         self.activated_idle = 0.0
         self.poll_id = None
         self.unlock_dialog_open = False
+        self.global_bindings = []
 
     def show(self, image_path, opacity, display_mode="fill"):
         if self.windows:
@@ -238,6 +239,12 @@ class PrivacyOverlay:
 
         self.windows = overlay_entries
         self.activated_idle = idle_seconds()
+        # A bind_all hook is the final fallback for borderless windows and
+        # guarantees that input cannot silently bypass the password dialog.
+        self.global_bindings = [
+            (sequence, self.app.bind_all(sequence, unlock_handler, add="+"))
+            for sequence in ("<KeyPress>", "<ButtonPress>", "<Motion>")
+        ]
         self.poll_id = self.app.after(250, self.poll_activity)
 
     def poll_activity(self):
@@ -262,6 +269,12 @@ class PrivacyOverlay:
             except tk.TclError:
                 pass
         self.windows = []
+        for sequence, binding_id in self.global_bindings:
+            try:
+                self.app.unbind_all(sequence, binding_id)
+            except tk.TclError:
+                pass
+        self.global_bindings = []
         self.app.deiconify()
         self.app.lift()
 
@@ -507,6 +520,9 @@ class App:
         x = max(0, (self.root.winfo_screenwidth() - dialog.winfo_width()) // 2)
         y = max(0, (self.root.winfo_screenheight() - dialog.winfo_height()) // 2)
         dialog.geometry(f"+{x}+{y}")
+        dialog.wait_visibility()
+        dialog.lift()
+        dialog.focus_force()
         dialog.grab_set()
         entry.focus_set()
         self.root.wait_window(dialog)
